@@ -31,6 +31,7 @@ module Fluent
       super
 
       require 'aws-sdk-core'
+      require 'json'
     end
 
     def configure(conf)
@@ -177,9 +178,21 @@ module Fluent
       }
       token = next_sequence_token(group_name, stream_name)
       args[:sequence_token] = token if token
-
-      response = @logs.put_log_events(args)
-      store_next_sequence_token(group_name, stream_name, response.next_sequence_token)
+      begin
+        response = @logs.put_log_events(args)
+        store_next_sequence_token(group_name, stream_name, response.next_sequence_token)
+      rescue Aws::CloudWatchLogs::Errors::InvalidSequenceTokenException => ex
+        log.warn "Failed to put events to log stream '#{stream_name} in log group '#{group_name}' because of the invalid sequence_token '#{token}'."
+        body = JSON.load(ex.context.http_response.body) rescue {}
+        expected_token = body['expectedSequenceToken']
+        unless expected_token.nil? or expected_token.empty?
+          log.warn "Set expected_sequence_token '#{expected_token}' to the next token of '#{stream_name} in log group '#{group_name}'"
+          store_next_sequence_token(group_name, stream_name, expected_token)
+        else
+          log.warn "Not found 'expected_sequence_token' in response body '#{ex.context.http_response.body_contents}. Nothing to do.'"
+        end
+        raise ex
+      end
     end
 
     def create_log_group(group_name)
